@@ -263,34 +263,48 @@ end
 
 
 -- ===================== 关闭流程 ==============================
--- 停止机器 → 投放坍缩器 → 等待所有配方结束 → 关闭时空信号
+-- ★ 安全策略：无论从哪个阶段进入关闭流程，都先打开时空信号。
+--   原因：机器停止接受新配方后，当前正在执行的配方仍会跑完。
+--   若此时 stability 接近 0 而时空又未供给，stability 会继续
+--   以 1/s 速率下降直到 < 0，机器进入不稳定态（blackHoleStatus=3），
+--   onRunningTick() 会将 mOutputItems/mOutputFluids 清空 ——
+--   即配方输出被吞噬，材料白白消失。
+--   提前打开时空可将 stability 冻结在当前值，确保配方安全结束。
 local function shutdown(reason)
+    -- 第一步：开启时空保护（即使之前未开也立即开启）
+    redstone.setOutput(CFG.rsSideSpacetime, 15)
+
+    -- 第二步：禁止接受新配方（当前配方仍会跑完）
     Machine.setWorkAllowed(false)
 
     local remainTicks = Machine.maxRemainingTicks()
     local waitSec     = math.ceil(remainTicks / 20)
 
+    -- 第三步：投入坍缩器（机器跑完当前配方后会自动拾取并关闭黑洞）
     Items.transferClosers()
 
+    -- 第四步：等待所有配方结束（期间时空保持供给，stability 不再下降）
     local t0 = computer.uptime()
     while Machine.anyRunning() do
         local elapsed = math.floor(computer.uptime() - t0)
         UI.update("关闭中",
             reason or "关闭黑洞中...",
-            string.format("等待配方结束  %d / %d 秒", elapsed, waitSec),
+            string.format("等待配方结束  %d / %d 秒  [时空保护中]", elapsed, waitSec),
             elapsed, waitSec, CFG.clrWarning)
         os.sleep(1)
     end
 
-    -- 若配置了多功能仓，等待其红石信号归零（黑洞已关闭）
+    -- 若配置了多功能仓，等待其红石信号归零（确认黑洞已关闭）
     if CFG.utilityHatchSide ~= nil then
         Utility.waitForState(false, 30)
     end
 
-    -- 二次确认：让机器跑半秒再关，防止物品卡在输入仓
+    -- 第五步：短暂重启让机器消化坍缩器，防止物品卡在输入仓
     Machine.setWorkAllowed(true)
     os.sleep(0.5)
     Machine.setWorkAllowed(false)
+
+    -- 第六步：黑洞已关闭，停止时空供给
     redstone.setOutput(CFG.rsSideSpacetime, 0)
 end
 
@@ -368,7 +382,10 @@ local function main()
 
             os.sleep(1)
 
-            -- ME 意外变空 → 提前收工
+            -- ME 意外变空 → 提前关闭
+            -- ★ 注意：此时时空信号尚未开启（稳定等待阶段），
+            --   调用 shutdown() 会先打开时空，再等待在途配方完成，
+            --   保证机器内的材料不会因黑洞失稳而被吞噬。
             if not ME.hasContent() then
                 shutdown("ME 已清空（稳定等待阶段）")
                 UI.update("空闲", "ME 已清空，等待下次任务...",
