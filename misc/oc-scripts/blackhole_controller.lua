@@ -216,9 +216,13 @@ end
 
 
 -- ===================== 关闭流程 ==============================
--- 先打开时空保护，防止 stability 继续下降导致在途配方输出被吞噬
-local function shutdown(reason)
-    redstone.setOutput(CFG.rsSideSpacetime, 15)
+-- spacetimeOn: 调用时时空是否已开启
+--   true  → 保持时空供应直到配方结束，防止 stability 继续下降吞噬输出
+--   false → 不开时空（稳定等待阶段 stability 充足，无需供应）
+local function shutdown(reason, spacetimeOn)
+    if spacetimeOn then
+        redstone.setOutput(CFG.rsSideSpacetime, 15)
+    end
     Machine.setWorkAllowed(false)
 
     local remainTicks = Machine.maxRemainingTicks()
@@ -318,9 +322,9 @@ local function main()
 
             os.sleep(1)
 
-            -- ME 意外清空 → 提前关闭（shutdown 会先开时空保护在途配方）
+            -- ME 意外清空 → 提前关闭（稳定等待阶段时空未开，不需要供应）
             if not ME.hasContent() then
-                shutdown("ME 已清空（稳定等待阶段）")
+                shutdown("ME 已清空（稳定等待阶段）", false)
                 UI.update("空闲", "ME 已清空，等待下次任务...",
                     "", 0, 0, CFG.clrIdle)
                 goto continue
@@ -358,13 +362,13 @@ local function main()
                 UI.update("重启中",
                     "运行时间过长，主动重启黑洞以重置 stability...",
                     "", 0, 0, CFG.clrWarning)
-                shutdown("运行超时，重启黑洞")
+                shutdown("运行超时，重启黑洞", true)
                 goto restart
             end
         end
 
-        -- 5. ME 已清空，正常关闭
-        shutdown("ME 已清空")
+        -- 5. ME 已清空，正常关闭（时空已开，保持供应直到配方结束）
+        shutdown("ME 已清空", true)
         UI.update("空闲", "等待 ME 网络出现内容...", "", 0, 0, CFG.clrIdle)
 
         ::continue::
