@@ -12,35 +12,49 @@ local computer  = require("computer")
 local sides     = require("sides")
 local unicode   = require("unicode")
 
--- ==================== 配置区（按需修改） ====================
+-- ============================================================
+-- >>>        手动配置区（请按实际环境修改）             <<<
+-- ============================================================
 local CFG = {
-    -- 方向：转运器来源/目标，时空信号输出，多功能仓信号输入
+    -- 转运器方向：来源方向 / 目标方向
     sourceSide       = sides.north,
     targetSide       = sides.south,
+
+    -- 时空信号红石输出方向
     rsSideSpacetime  = sides.up,
-    utilityHatchSide = nil,   -- 多功能仓方向，不用则填 nil
+
+    -- 多功能仓（MTEBlackHoleUtility）红石输入方向
+    -- 静态模式下黑洞开启时输出红石 15；不使用则填 nil
+    utilityHatchSide = nil,
 
     -- 缓存箱槽位
-    seedSlot         = 1,   -- 黑洞种子
-    collapseSlot     = 2,   -- 黑洞坍缩器
+    seedSlot         = 1,   -- 黑洞种子所在槽位
+    collapseSlot     = 2,   -- 黑洞坍缩器所在槽位
 
-    -- 时间（秒）
-    -- stability 从 100 以 1/s 衰减：<50 并行×2，<20 并行×4
-    -- 82s 后 stability ≈ 18，刚好达到最大并行；不要超过 100s
-    stabilizeWait    = 82,
-    maxRunTime       = 300,  -- 单轮超时后自动重启黑洞
-    pollInterval     = 1.0,
-
-    -- 显示
+    -- 显示分辨率（与实际屏幕规格匹配）
     screenWidth      = 46,
     screenHeight     = 12,
-    clrNormal  = 0x00FF88,
-    clrWarning = 0xFFAA00,
-    clrError   = 0xFF4444,
-    clrIdle    = 0x888888,
-    clrTitle   = 0x00CCFF,
 }
--- =============================================================
+
+-- ============================================================
+-- >>>        内部参数（一般无需修改）                   <<<
+-- ============================================================
+
+-- stability 从 100 以 1/s 衰减：<50 并行×2，<20 并行×4
+-- 82s 后 stability ≈ 18，刚好达到最大并行；不建议超过 100s
+CFG.stabilizeWait = 82
+-- 单轮运行超时（秒），超时后主动重启黑洞以重置 stability
+CFG.maxRunTime    = 300
+-- 主循环轮询间隔（秒）
+CFG.pollInterval  = 1.0
+
+-- 显示颜色
+CFG.clrNormal  = 0x00FF88
+CFG.clrWarning = 0xFFAA00
+CFG.clrError   = 0xFF4444
+CFG.clrIdle    = 0x888888
+CFG.clrTitle   = 0x00CCFF
+-- ============================================================
 
 
 -- ===================== 组件绑定 ==============================
@@ -188,8 +202,10 @@ end
 local ME = {}
 
 function ME.hasContent()
-    return me.getItemsInNetwork()[1]  ~= nil
-        or me.getFluidsInNetwork()[1] ~= nil
+    local items  = me.getItemsInNetwork()
+    local fluids = me.getFluidsInNetwork()
+    return (items  ~= nil and next(items)  ~= nil)
+        or (fluids ~= nil and next(fluids) ~= nil)
 end
 
 
@@ -232,18 +248,33 @@ local function shutdown(reason, spacetimeOn)
 
     -- 等待所有配方结束
     local t0 = computer.uptime()
+    local protection = spacetimeOn and "  [时空保护中]" or ""
     while Machine.anyRunning() do
         local elapsed = math.floor(computer.uptime() - t0)
         UI.update("关闭中",
             reason or "关闭黑洞中...",
-            string.format("等待配方结束  %d / %d 秒  [时空保护中]", elapsed, waitSec),
+            string.format("等待配方结束  %d / %d 秒%s", elapsed, waitSec, protection),
             elapsed, waitSec, CFG.clrWarning)
         os.sleep(1)
     end
 
-    -- 若配置了多功能仓，确认黑洞已关闭
+    -- 配方已完成，立即更新至 100%，避免 UI 冻结在上一次进度
+    UI.update("关闭中", reason or "关闭黑洞中...",
+        "配方已完成，正在收尾..." .. protection,
+        waitSec, waitSec, CFG.clrWarning)
+
+    -- 若配置了多功能仓，等待黑洞关闭信号，期间持续刷新 UI
     if CFG.utilityHatchSide ~= nil then
-        Utility.waitForState(false, 30)
+        local t1    = computer.uptime()
+        local limit = 30
+        while computer.uptime() < t1 + limit do
+            if Utility.isBlackHoleActive() == false then break end
+            UI.update("关闭中", reason or "关闭黑洞中...",
+                string.format("等待黑洞关闭信号... %.0f / %d 秒",
+                    computer.uptime() - t1, limit),
+                waitSec, waitSec, CFG.clrWarning)
+            os.sleep(0.5)
+        end
     end
 
     -- 短暂重启，让机器消化坍缩器（防止物品卡在输入仓）
