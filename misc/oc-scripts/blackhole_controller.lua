@@ -1,80 +1,44 @@
--- ============================================================
--- blackhole_controller.lua  v2.0
--- OpenComputers 黑洞压缩机（Pseudostable Black Hole
--- Containment Field，BHC）自动化控制脚本
+-- blackhole_controller.lua
+-- BHC（黑洞压缩机）自动化控制脚本
 --
--- 改进点（相较于原版 blackhole.lua）：
---   · 彩色 UI，带进度条与运行时间显示
---   · 支持"黑洞多功能仓"（MTEBlackHoleUtility）红石信号检测
---     ——可实时判断黑洞开闭状态，无需额外轮询
---   · 全局配置表，便于调整而无需深入读代码
---   · 分模块（UI / Machine / Items / ME / Utility）
---   · 更健壮的关闭流程与异常恢复
---   · 用 pcall 保护主循环，崩溃时自动关机并恢复终端
---
--- 多功能仓说明（MTEBlackHoleUtility）：
---   · "静态模式"：黑洞开启期间持续输出红石信号 15
---   · "脉冲模式"：黑洞开启时每秒发出一个 5 tick（0.25 s）脉冲
---   · 将 CFG.utilityHatchSide 设为对应方向即可启用检测；
---     设为 nil 则完全依赖机器轮询（不影响其他功能）
---
--- 组件需求：
---   · gpu（显示器）
---   · transposer（转运器，连接放种子/坍缩器的缓存箱）
---   · redstone（红石 I/O，输出时空流体控制信号）
---   · me_controller（AE2 ME 控制器，判断网络是否有内容）
---   · gt_machine（OC 适配器连接到黑洞压缩机控制器方块）
--- ============================================================
+-- 所需组件：
+--   gpu / transposer / redstone / me_controller / gt_machine（OC 适配器接控制器）
+-- 多功能仓（MTEBlackHoleUtility）：
+--   静态模式——黑洞开启时持续输出红石 15，推荐使用。
+--   将 CFG.utilityHatchSide 设为对应方向启用；nil 表示不使用。
 
 local component = require("component")
 local computer  = require("computer")
 local sides     = require("sides")
+local unicode   = require("unicode")
 
 -- ==================== 配置区（按需修改） ====================
 local CFG = {
-
-    -- 【方向】 ------------------------------------------------
-    -- 转运器读取种子 / 坍缩器的方向（连接缓存箱一侧）
+    -- 方向：转运器来源/目标，时空信号输出，多功能仓信号输入
     sourceSide       = sides.north,
-    -- 转运器输出到机器输入仓的方向
     targetSide       = sides.south,
-    -- 红石 I/O 向时空注入仓发出开关信号的方向
-    --（信号 15 = 允许注入时空；信号 0 = 停止注入）
     rsSideSpacetime  = sides.up,
-    -- 【可选】多功能仓红石输出进入 OC 红石 I/O 的方向
-    --   · 若未安装多功能仓，请保持 nil
-    --   · 多功能仓建议设为"静态模式"（黑洞开时持续输出15）
-    utilityHatchSide = nil,   -- 示例: sides.east
+    utilityHatchSide = nil,   -- 多功能仓方向，不用则填 nil
 
-    -- 【槽位】（缓存箱内） ------------------------------------
-    seedSlot         = 1,   -- 黑洞种子（Black Hole Seed）
-    collapseSlot     = 2,   -- 黑洞坍缩器（Black Hole Collapser）
+    -- 缓存箱槽位
+    seedSlot         = 1,   -- 黑洞种子
+    collapseSlot     = 2,   -- 黑洞坍缩器
 
-    -- 【时间（秒）】 ------------------------------------------
-    -- ★ 关键：stability 从 100 开始以 1/s 速率自然下降：
-    --   · stability < 50 → 并行数 ×2
-    --   · stability < 20 → 并行数 ×4（最大并行！）
-    --   · stability <  0 → 黑洞不稳定，配方会被清空
-    -- 因此在启用时空信号"冻结"稳定性之前，必须等待稳定性
-    -- 自然衰减到 < 20，才能达到最大并行。
-    --   stabilizeWait = 82 s → stability ≈ 18（< 20，安全达最大并行）
-    --   stabilizeWait 不应超过 100 s，否则稳定性归零机器进入不稳定态。
+    -- 时间（秒）
+    -- stability 从 100 以 1/s 衰减：<50 并行×2，<20 并行×4
+    -- 82s 后 stability ≈ 18，刚好达到最大并行；不要超过 100s
     stabilizeWait    = 82,
-    -- 单轮最长运行时间，超时后自动重启黑洞（防止异常卡死）
-    -- 重启会将 stability 重置为 100，并重新等待衰减至 < 20
-    maxRunTime       = 300,
-    -- 主循环轮询间隔（秒）
+    maxRunTime       = 300,  -- 单轮超时后自动重启黑洞
     pollInterval     = 1.0,
 
-    -- 【显示】 ------------------------------------------------
+    -- 显示
     screenWidth      = 46,
     screenHeight     = 12,
-    -- 颜色（0xRRGGBB）
-    clrNormal  = 0x00FF88,  -- 正常 / 运行中
-    clrWarning = 0xFFAA00,  -- 警告 / 过渡
-    clrError   = 0xFF4444,  -- 错误
-    clrIdle    = 0x888888,  -- 空闲
-    clrTitle   = 0x00CCFF,  -- 标题
+    clrNormal  = 0x00FF88,
+    clrWarning = 0xFFAA00,
+    clrError   = 0xFF4444,
+    clrIdle    = 0x888888,
+    clrTitle   = 0x00CCFF,
 }
 -- =============================================================
 
@@ -99,14 +63,14 @@ assert(#machines > 0,
 -- ===================== UI 模块 ===============================
 local UI = {}
 
--- 内部状态缓存（避免每帧全屏重绘）
 local _ui = {
     status = "", info1 = "", info2 = "",
     elapsed = 0, total = 0, color = CFG.clrNormal,
 }
 
+-- 用显示宽度（而非字节数）填充到 n 列，修复中文字符撑不满行的问题
 local function _padRight(s, n)
-    local pad = n - #s
+    local pad = n - unicode.wlen(s)
     if pad <= 0 then return s end
     return s .. string.rep(" ", pad)
 end
@@ -116,13 +80,10 @@ function UI.init()
         gpu.setResolution(CFG.screenWidth, CFG.screenHeight)
     end)
     if not ok then
-        -- 分辨率不支持时退而求其次
         gpu.setViewport(CFG.screenWidth, CFG.screenHeight)
     end
     gpu.setBackground(0x000000)
-    -- 清屏
     gpu.fill(1, 1, CFG.screenWidth, CFG.screenHeight, " ")
-    -- 固定标题行
     gpu.setForeground(CFG.clrTitle)
     gpu.set(1, 1, _padRight(
         string.format("  ◆ BHC 自动控制器  [%d 台机器]  ", #machines),
@@ -142,15 +103,11 @@ function UI.update(status, info1, info2, elapsed, total, color)
     _ui.color   = color   or CFG.clrNormal
 
     gpu.setForeground(_ui.color)
-
-    -- 行 3：状态
     gpu.set(1, 3, _padRight("  状态: " .. _ui.status, CFG.screenWidth))
-    -- 行 4：信息1
     gpu.set(1, 4, _padRight("  " .. _ui.info1, CFG.screenWidth))
-    -- 行 5：信息2
     gpu.set(1, 5, _padRight("  " .. _ui.info2, CFG.screenWidth))
 
-    -- 行 7-9：进度条区域
+    -- 进度条（行 7-8）
     if _ui.total > 0 then
         gpu.setForeground(_ui.color)
         local barW  = CFG.screenWidth - 4
@@ -167,7 +124,7 @@ function UI.update(status, info1, info2, elapsed, total, color)
         gpu.fill(1, 7, CFG.screenWidth, 2, " ")
     end
 
-    -- 行 11：系统运行时间（灰色）
+    -- 运行时间（行 11，灰色）
     gpu.setForeground(0x555555)
     gpu.set(1, 11, _padRight(
         string.format("  系统运行: %.0f 秒", computer.uptime()),
@@ -193,7 +150,7 @@ function Machine.anyRunning()
     return false
 end
 
--- 返回所有机器中最大的剩余 tick 数
+-- 返回所有机器中最大的剩余 tick 数（用于估算等待时间）
 function Machine.maxRemainingTicks()
     local maxTicks = 0
     for _, addr in ipairs(machines) do
@@ -237,53 +194,39 @@ end
 
 
 -- ===================== Utility Hatch 模块 ====================
--- 黑洞多功能仓（MTEBlackHoleUtility）检测
--- 当 CFG.utilityHatchSide ~= nil 时启用；
--- 建议将多功能仓设为"静态模式"，黑洞开启时持续输出红石 15。
+-- 读取多功能仓红石信号判断黑洞状态（需配置 utilityHatchSide）
 local Utility = {}
 
--- 返回 true/false（已配置），或 nil（未配置，不可用）
+-- 返回 true/false，未配置则返回 nil
 function Utility.isBlackHoleActive()
     if CFG.utilityHatchSide == nil then return nil end
     return redstone.getInput(CFG.utilityHatchSide) > 0
 end
 
--- 等待多功能仓信号变为目标值；超时返回 false
--- targetActive: true = 等黑洞打开，false = 等黑洞关闭
--- timeout: 最长等待秒数
+-- 等待信号达到目标状态，超时返回 false
 function Utility.waitForState(targetActive, timeout)
-    if CFG.utilityHatchSide == nil then return true end  -- 未配置，直接通过
+    if CFG.utilityHatchSide == nil then return true end
     local deadline = computer.uptime() + (timeout or 120)
     while computer.uptime() < deadline do
         if Utility.isBlackHoleActive() == targetActive then return true end
         os.sleep(0.5)
     end
-    return false  -- 超时
+    return false
 end
 
 
 -- ===================== 关闭流程 ==============================
--- ★ 安全策略：无论从哪个阶段进入关闭流程，都先打开时空信号。
---   原因：机器停止接受新配方后，当前正在执行的配方仍会跑完。
---   若此时 stability 接近 0 而时空又未供给，stability 会继续
---   以 1/s 速率下降直到 < 0，机器进入不稳定态（blackHoleStatus=3），
---   onRunningTick() 会将 mOutputItems/mOutputFluids 清空 ——
---   即配方输出被吞噬，材料白白消失。
---   提前打开时空可将 stability 冻结在当前值，确保配方安全结束。
+-- 先打开时空保护，防止 stability 继续下降导致在途配方输出被吞噬
 local function shutdown(reason)
-    -- 第一步：开启时空保护（即使之前未开也立即开启）
     redstone.setOutput(CFG.rsSideSpacetime, 15)
-
-    -- 第二步：禁止接受新配方（当前配方仍会跑完）
     Machine.setWorkAllowed(false)
 
     local remainTicks = Machine.maxRemainingTicks()
     local waitSec     = math.ceil(remainTicks / 20)
 
-    -- 第三步：投入坍缩器（机器跑完当前配方后会自动拾取并关闭黑洞）
-    Items.transferClosers()
+    Items.transferClosers()   -- 投入坍缩器，配方跑完后机器自动关闭黑洞
 
-    -- 第四步：等待所有配方结束（期间时空保持供给，stability 不再下降）
+    -- 等待所有配方结束
     local t0 = computer.uptime()
     while Machine.anyRunning() do
         local elapsed = math.floor(computer.uptime() - t0)
@@ -294,17 +237,16 @@ local function shutdown(reason)
         os.sleep(1)
     end
 
-    -- 若配置了多功能仓，等待其红石信号归零（确认黑洞已关闭）
+    -- 若配置了多功能仓，确认黑洞已关闭
     if CFG.utilityHatchSide ~= nil then
         Utility.waitForState(false, 30)
     end
 
-    -- 第五步：短暂重启让机器消化坍缩器，防止物品卡在输入仓
+    -- 短暂重启，让机器消化坍缩器（防止物品卡在输入仓）
     Machine.setWorkAllowed(true)
     os.sleep(0.5)
     Machine.setWorkAllowed(false)
 
-    -- 第六步：黑洞已关闭，停止时空供给
     redstone.setOutput(CFG.rsSideSpacetime, 0)
 end
 
@@ -339,7 +281,7 @@ local function main()
             goto continue
         end
 
-        -- ── ME 有内容，启动一轮处理 ─────────────────────────
+        -- ME 有内容，启动一轮处理
         ::restart::
 
         -- 1. 确保缓存箱内种子与坍缩器数量充足
@@ -349,25 +291,19 @@ local function main()
         Items.transferSeeds()
         Machine.setWorkAllowed(true)
 
-        -- 3. 等待稳定阶段
-        --    策略：不开时空信号，让 stability 自然衰减。
-        --    stability = 100 − elapsed（秒）：
-        --      · elapsed > 50 s → stability < 50 → 并行 ×2
-        --      · elapsed > 80 s → stability < 20 → 并行 ×4（最大！）
-        --    stabilizeWait 默认 82 s，确保时空信号开启时
-        --    stability ≈ 18，机器已处于最大并行模式。
+        -- 3. 稳定等待阶段：不开时空，让 stability 自然衰减
+        --    stability = 100 − elapsed，<50 并行×2，<20 并行×4
+        --    等 stabilizeWait 秒后 stability ≈ 18，达到最大并行
         local t0 = computer.uptime()
         while computer.uptime() < t0 + CFG.stabilizeWait do
             local elapsed = math.floor(computer.uptime() - t0)
 
-            -- 检测多功能仓状态（如已配置）
             local hatchInfo = ""
             local hatchActive = Utility.isBlackHoleActive()
             if hatchActive ~= nil then
                 hatchInfo = "  多功能仓: " .. (hatchActive and "★ 活跃" or "◌ 关闭")
             end
 
-            -- stability ≈ 100 - elapsed（最小为 0）
             local estStability = math.max(0, 100 - elapsed)
             local parallelMul  = 1
             if estStability < 20 then parallelMul = 4
@@ -382,10 +318,7 @@ local function main()
 
             os.sleep(1)
 
-            -- ME 意外变空 → 提前关闭
-            -- ★ 注意：此时时空信号尚未开启（稳定等待阶段），
-            --   调用 shutdown() 会先打开时空，再等待在途配方完成，
-            --   保证机器内的材料不会因黑洞失稳而被吞噬。
+            -- ME 意外清空 → 提前关闭（shutdown 会先开时空保护在途配方）
             if not ME.hasContent() then
                 shutdown("ME 已清空（稳定等待阶段）")
                 UI.update("空闲", "ME 已清空，等待下次任务...",
@@ -394,12 +327,8 @@ local function main()
             end
         end
 
-        -- 4. 开启时空信号，进入正式运行阶段
-        --    此时 stability ≈ 18（< 20），机器处于最大并行（×4）。
-        --    时空流体注入可阻止 stability 继续下降（冻结在当前值）：
-        --      · 每秒消耗 1 L 时空可将衰减归零
-        --      · 每累计节省 30 s 后，每秒消耗量翻倍
-        --    若时空供应中断，stability 继续下降直至 < 0 进入不稳定态。
+        -- 4. 开启时空信号，冻结 stability，进入正式运行
+        --    每 30s 消耗量翻倍；供应中断则 stability 继续衰减
         redstone.setOutput(CFG.rsSideSpacetime, 15)
         t0 = computer.uptime()
 
@@ -424,7 +353,7 @@ local function main()
 
             os.sleep(1)
 
-            -- 运行超时 → 重启黑洞（防止 stability 耗尽导致黑洞崩溃）
+            -- 运行超时 → 重启黑洞，重置 stability
             if computer.uptime() >= t0 + CFG.maxRunTime then
                 UI.update("重启中",
                     "运行时间过长，主动重启黑洞以重置 stability...",
@@ -439,14 +368,14 @@ local function main()
         UI.update("空闲", "等待 ME 网络出现内容...", "", 0, 0, CFG.clrIdle)
 
         ::continue::
-    end  -- while true
+    end
 end
 
 
 -- ===================== 入口与清理 ============================
 local ok, err = pcall(main)
 
--- 无论如何都执行清理，防止机器悬空运行
+-- 脚本退出时确保机器停止、时空关闭
 Machine.setWorkAllowed(false)
 while Machine.anyRunning() do os.sleep(0.5) end
 redstone.setOutput(CFG.rsSideSpacetime, 0)
@@ -459,6 +388,5 @@ pcall(function()
 end)
 
 if not ok then
-    -- 重新抛出，让 OC shell 显示错误信息
     error(err, 0)
 end
