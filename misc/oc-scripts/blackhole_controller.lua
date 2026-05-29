@@ -263,6 +263,29 @@ local function shutdown(reason, spacetimeOn)
         "配方已完成，正在收尾..." .. protection,
         waitSec, waitSec, CFG.clrWarning)
 
+    -- 重新启用，让机器将坍缩器作为下一个配方消耗（关闭黑洞）
+    -- 不能用 sleep(0.5) 代替：坍缩器配方至少需要 1 秒才能完成，
+    -- 过早禁用会导致坍缩器卡在输入仓无法被消耗。
+    Machine.setWorkAllowed(true)
+
+    -- 等待机器检测到坍缩器并开始配方（通常 1~2 s 内）
+    os.sleep(2)
+
+    -- 继续等待坍缩器配方跑完，机器回到空闲（最长 60 s 超时）
+    local tCl      = computer.uptime()
+    local clTimeout = 60
+    while Machine.anyRunning() do
+        local elapsed = math.floor(computer.uptime() - tCl)
+        UI.update("关闭中", reason or "关闭黑洞中...",
+            string.format("等待坍缩器消耗黑洞...  %d / %d 秒",
+                elapsed, clTimeout),
+            elapsed, clTimeout, CFG.clrWarning)
+        os.sleep(1)
+        if computer.uptime() >= tCl + clTimeout then break end
+    end
+
+    Machine.setWorkAllowed(false)
+
     -- 若配置了多功能仓，等待黑洞关闭信号，期间持续刷新 UI
     if CFG.utilityHatchSide ~= nil then
         local t1    = computer.uptime()
@@ -276,11 +299,6 @@ local function shutdown(reason, spacetimeOn)
             os.sleep(0.5)
         end
     end
-
-    -- 短暂重启，让机器消化坍缩器（防止物品卡在输入仓）
-    Machine.setWorkAllowed(true)
-    os.sleep(0.5)
-    Machine.setWorkAllowed(false)
 
     redstone.setOutput(CFG.rsSideSpacetime, 0)
 end
