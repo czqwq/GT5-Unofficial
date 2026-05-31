@@ -1277,3 +1277,5 @@ tc.aspect.help.custom2=扭曲的思想
 tc.aspect.help.custom3=新事物的起始
 tc.aspect.help.custom4=宇宙
 tc.aspect.help.custom5=荣耀
+
+GT5U.gui.text.shutdown_reason.nac_output_hatch_missing=§4有色输出传送舱在配方执行过程中消失。
