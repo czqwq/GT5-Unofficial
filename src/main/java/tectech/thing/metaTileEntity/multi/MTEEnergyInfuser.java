@@ -97,10 +97,6 @@ public class MTEEnergyInfuser extends TTMultiblockBase implements ISurvivalConst
                 return ElectricItem.manager.getCharge(stack) >= ((IElectricItem) item).getMaxCharge(stack);
             } else if (Mods.COFHCore.isModLoaded() && item instanceof IEnergyContainerItem) {
                 IEnergyContainerItem rfItem = (IEnergyContainerItem) item;
-                // Also check receiveEnergy(..., simulate=true) == 0 to handle items like DraconiumItemBlock that
-                // transform into a different damage variant when fully charged, clearing their energy NBT.
-                // In that state getEnergyStored() returns 0 but the item cannot accept any more energy.
-                // This mirrors the check used in TileEnergyInfuser.canExtractItem in Draconic Evolution itself.
                 return rfItem.getEnergyStored(stack) >= rfItem.getMaxEnergyStored(stack)
                     || rfItem.receiveEnergy(stack, 1, true) == 0;
             }
